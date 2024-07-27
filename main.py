@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from sklearn.cluster import KMeans
+import sys
 import collections
 from copy import deepcopy
 import os
@@ -51,11 +52,13 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
 
             tokens = torch.stack([x.to(config.device) for x in tokens],dim=0)
             reps = encoder(tokens) # B x 2H
-        
+
+            hidden_size = reps.shape[1] // 2
+            reps = reps[:, :hidden_size] # BxH
             # compute loss 
-            reps, _ = dropout_layer(reps)
-            logits = classifier(reps)
-            loss = criterion(logits, labels)
+            # reps, _ = dropout_layer(reps)
+            # logits = classifier(reps)
+            # loss = criterion(logits, labels)
 
             # get description of batch
             batch_description = []
@@ -74,8 +77,8 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
             # compute loss retrieval
             loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
 
-            loss = 0.7*loss + loss_r 
-
+            # loss = 0.7*loss + loss_r 
+            loss = loss_r
 
             losses.append(loss.item())
             loss.backward()
@@ -124,73 +127,6 @@ def construct_hard_triplets(output, labels, relation_data):
     return positive, negative
 
 
-def train_first(config, encoder, dropout_layer, classifier, training_data, epochs, map_relid2tempid, new_relation_data):
-    data_loader = get_data_loader(config, training_data, shuffle=True)
-
-    encoder.train()
-    dropout_layer.train()
-    classifier.train()
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam([
-        {'params': encoder.parameters(), 'lr': 0.00001},
-        {'params': dropout_layer.parameters(), 'lr': 0.00001},
-        {'params': classifier.parameters(), 'lr': 0.001}
-    ])
-    loss_retrieval = MultipleNegativesRankingLoss()
-
-    triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
-    for epoch_i in range(epochs):
-        losses = []
-        for step, (labels, _, tokens) in enumerate(data_loader):
-
-            optimizer.zero_grad()
-
-            logits_all = []
-            tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
-            labels = labels.to(config.device)
-            origin_labels = labels[:]
-            labels = [map_relid2tempid[x.item()] for x in labels]
-            labels = torch.tensor(labels).to(config.device)
-            reps = encoder(tokens)
-            outputs,_ = dropout_layer(reps)
-            positives,negatives = construct_hard_triplets(outputs, origin_labels, new_relation_data)
-
-            for _ in range(config.f_pass):
-                output, output_embedding = dropout_layer(reps)
-                logits = classifier(output)
-                logits_all.append(logits)
-
-            positives = torch.cat(positives, 0).to(config.device)
-            negatives = torch.cat(negatives, 0).to(config.device)
-            anchors = outputs
-            logits_all = torch.stack(logits_all)
-            m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
-            loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
-            loss2 = compute_jsd_loss(logits_all)
-            tri_loss = triplet_loss(anchors, positives, negatives)
-
-            batch_description = []
-            for label in origin_labels:
-                batch_description.append(seen_des_by_id[label.item()])
-            batch_description = torch.cat(batch_description, dim=0)
-
-            hidden_des = encoder.forward_description(batch_description) # B x H
-            # label_matrix : B x B => 1 if label is the same, 0 otherwise
-            label_matrix = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float().to(config.device)
-            # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
-            mini_reps = outputs
-            
-            # compute loss retrieval
-            loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
-
-            loss = loss1 + loss2 + tri_loss + 2*loss_r
-
-            loss.backward()
-            losses.append(loss.item())
-            optimizer.step()
-        print(f"loss is {np.array(losses).mean()}")
-
 
 def train_mem_model(config, encoder, dropout_layer, classifier, training_data, epochs, map_relid2tempid, new_relation_data,
                 prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id):
@@ -227,70 +163,75 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
             origin_labels = labels[:]
             labels = [map_relid2tempid[x.item()] for x in labels]
             labels = torch.tensor(labels).to(config.device)
-            reps = encoder(tokens)
-            normalized_reps_emb = F.normalize(reps.view(-1, reps.size()[1]), p=2, dim=1)
-            outputs,_ = dropout_layer(reps)
-            if prev_dropout_layer is not None:
-                prev_outputs, _ = prev_dropout_layer(reps)
-                positives,negatives = construct_hard_triplets(prev_outputs, origin_labels, new_relation_data)
-            else:
-                positives, negatives = construct_hard_triplets(outputs, origin_labels, new_relation_data)
+            reps = encoder(tokens) # Bx2H
+ 
+            hidden_size = reps.shape[1] //2
+            reps = reps[:, :hidden_size]
 
-            for _ in range(config.f_pass):
-                output, output_embedding = dropout_layer(reps)
-                logits = classifier(output)
-                logits_all.append(logits)
 
-            positives = torch.cat(positives, 0).to(config.device)
-            negatives = torch.cat(negatives, 0).to(config.device)
-            anchors = outputs
-            logits_all = torch.stack(logits_all)
-            m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
-            loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
-            loss2 = compute_jsd_loss(logits_all)
-            tri_loss = triplet_loss(anchors, positives, negatives)
-            loss = loss1 + loss2 + tri_loss
+            # normalized_reps_emb = F.normalize(reps.view(-1, reps.size()[1]), p=2, dim=1)
+            # outputs,_ = dropout_layer(reps)
+            # if prev_dropout_layer is not None:
+            #     prev_outputs, _ = prev_dropout_layer(reps)
+            #     positives,negatives = construct_hard_triplets(prev_outputs, origin_labels, new_relation_data)
+            # else:
+            #     positives, negatives = construct_hard_triplets(outputs, origin_labels, new_relation_data)
 
-            if prev_encoder is not None:
-                prev_reps = prev_encoder(tokens).detach()
-                normalized_prev_reps_emb = F.normalize(prev_reps.view(-1, prev_reps.size()[1]), p=2, dim=1)
+            # for _ in range(config.f_pass):
+            #     output, output_embedding = dropout_layer(reps)
+            #     logits = classifier(output)
+            #     logits_all.append(logits)
 
-                feature_distill_loss = distill_criterion(normalized_reps_emb, normalized_prev_reps_emb,
-                                                         torch.ones(tokens.size(0)).to(
-                                                             config.device))
-                loss += feature_distill_loss
+            # positives = torch.cat(positives, 0).to(config.device)
+            # negatives = torch.cat(negatives, 0).to(config.device)
+            # anchors = outputs
+            # logits_all = torch.stack(logits_all)
+            # m_labels = labels.expand((config.f_pass, labels.shape[0]))  # m,B
+            # loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
+            # loss2 = compute_jsd_loss(logits_all)
+            # tri_loss = triplet_loss(anchors, positives, negatives)
+            # loss = loss1 + loss2 + tri_loss
 
-            if prev_dropout_layer is not None and prev_classifier is not None:
-                prediction_distill_loss = None
-                dropout_output_all = []
-                prev_dropout_output_all = []
-                for i in range(config.f_pass):
-                    output, _ = dropout_layer(reps)
-                    prev_output, _ = prev_dropout_layer(reps)
-                    dropout_output_all.append(output)
-                    prev_dropout_output_all.append(output)
-                    pre_logits = prev_classifier(output).detach()
+            # if prev_encoder is not None:
+            #     prev_reps = prev_encoder(tokens).detach()
+            #     normalized_prev_reps_emb = F.normalize(prev_reps.view(-1, prev_reps.size()[1]), p=2, dim=1)
 
-                    pre_logits = F.softmax(pre_logits.index_select(1, prev_relation_index) / T, dim=1)
+            #     feature_distill_loss = distill_criterion(normalized_reps_emb, normalized_prev_reps_emb,
+            #                                              torch.ones(tokens.size(0)).to(
+            #                                                  config.device))
+            #     loss += feature_distill_loss
 
-                    log_logits = F.log_softmax(logits_all[i].index_select(1, prev_relation_index) / T, dim=1)
-                    if i == 0:
-                        prediction_distill_loss = -torch.mean(torch.sum(pre_logits * log_logits, dim=1))
-                    else:
-                        prediction_distill_loss += -torch.mean(torch.sum(pre_logits * log_logits, dim=1))
+            # if prev_dropout_layer is not None and prev_classifier is not None:
+            #     prediction_distill_loss = None
+            #     dropout_output_all = []
+            #     prev_dropout_output_all = []
+            #     for i in range(config.f_pass):
+            #         output, _ = dropout_layer(reps)
+            #         prev_output, _ = prev_dropout_layer(reps)
+            #         dropout_output_all.append(output)
+            #         prev_dropout_output_all.append(output)
+            #         pre_logits = prev_classifier(output).detach()
 
-                prediction_distill_loss /= config.f_pass
-                loss += prediction_distill_loss
-                dropout_output_all = torch.stack(dropout_output_all)
-                prev_dropout_output_all = torch.stack(prev_dropout_output_all)
-                mean_dropout_output_all = torch.mean(dropout_output_all, dim=0)
-                mean_prev_dropout_output_all = torch.mean(prev_dropout_output_all,dim=0)
-                normalized_output = F.normalize(mean_dropout_output_all.view(-1, mean_dropout_output_all.size()[1]), p=2, dim=1)
-                normalized_prev_output = F.normalize(mean_prev_dropout_output_all.view(-1, mean_prev_dropout_output_all.size()[1]), p=2, dim=1)
-                hidden_distill_loss = distill_criterion(normalized_output, normalized_prev_output,
-                                                         torch.ones(tokens.size(0)).to(
-                                                             config.device))
-                loss += hidden_distill_loss
+            #         pre_logits = F.softmax(pre_logits.index_select(1, prev_relation_index) / T, dim=1)
+
+            #         log_logits = F.log_softmax(logits_all[i].index_select(1, prev_relation_index) / T, dim=1)
+            #         if i == 0:
+            #             prediction_distill_loss = -torch.mean(torch.sum(pre_logits * log_logits, dim=1))
+            #         else:
+            #             prediction_distill_loss += -torch.mean(torch.sum(pre_logits * log_logits, dim=1))
+
+            #     prediction_distill_loss /= config.f_pass
+            #     loss += prediction_distill_loss
+            #     dropout_output_all = torch.stack(dropout_output_all)
+            #     prev_dropout_output_all = torch.stack(prev_dropout_output_all)
+            #     mean_dropout_output_all = torch.mean(dropout_output_all, dim=0)
+            #     mean_prev_dropout_output_all = torch.mean(prev_dropout_output_all,dim=0)
+            #     normalized_output = F.normalize(mean_dropout_output_all.view(-1, mean_dropout_output_all.size()[1]), p=2, dim=1)
+            #     normalized_prev_output = F.normalize(mean_prev_dropout_output_all.view(-1, mean_prev_dropout_output_all.size()[1]), p=2, dim=1)
+            #     hidden_distill_loss = distill_criterion(normalized_output, normalized_prev_output,
+            #                                              torch.ones(tokens.size(0)).to(
+            #                                                  config.device))
+            #     loss += hidden_distill_loss
 
 
             batch_description = []
@@ -302,12 +243,13 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
             # label_matrix : B x B => 1 if label is the same, 0 otherwise
             label_matrix = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float().to(config.device)
             # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
-            mini_reps = outputs
+
             
             # compute loss retrieval
-            loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
+            loss_r = loss_retrieval(reps, hidden_des, label_matrix)
 
-            loss = 0.7*loss + loss_r
+            # loss = 0.7*loss + loss_r
+            loss = loss_r
 
             loss.backward()
             losses.append(loss.item())
@@ -329,6 +271,59 @@ def batch2device(batch_tuple, device):
         else:
             ans.append(var)
     return ans
+
+
+def _edist( x1, x2):
+        '''
+        input: x1 (B, H), x2 (N, H) ; N is the number of relations
+        return: (B, N)
+        '''
+        b = x1.size()[0]
+        L2dist = nn.PairwiseDistance(p=2)
+        dist = [] # B
+        for i in range(b):
+            dist_i = L2dist(x2, x1[i])
+            dist.append(torch.unsqueeze(dist_i, 0)) # (N) --> (1,N)
+        dist = torch.cat(dist, 0) # (B, N)
+        return dist
+
+def eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data):
+    batch_size = 16
+    n = len(test_data)
+    test_loader = get_data_loader(config, test_data, batch_size=batch_size)
+    
+    correct = 0
+    for step, batch_data in enumerate(test_loader):
+        labels, _, tokens = batch_data
+        origin_labels = labels[:] # label as relation id
+
+        labels = labels.to(config.device) # label as 0 1 2 3 ...
+        labels = [map_relid2tempid[x.item()] for x in labels]
+        labels = torch.tensor(labels).to(config.device)
+
+        tokens = torch.stack([x.to(config.device) for x in tokens],dim=0)
+        reps = encoder(tokens)
+        # reps, _ = dropout_layer(reps)
+        # logits = classifier(reps)
+        reps = reps[:, :reps.shape[1]//2]
+        fea = reps.cpu().data
+        logits = -_edist(fea, seen_proto)
+        cur_index = torch.argmax(logits, dim=1)  # (B)
+        pred = []
+        for i in range(cur_index.size()[0]):
+            pred.append(seen_relid[int(cur_index[i])])
+        pred = torch.tensor(pred)
+
+        # max_smi = np.max(seen_sim,axis=1)
+
+
+        # label_smi = logits[:,labels].cpu().data.numpy()
+
+        # if label_smi >= max_smi:
+        #     correct += 1
+        correct += torch.eq(pred, origin_labels).sum().item()
+    return correct / n
+
 
 
 def evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data, seen_relations, map_relid2tempid):
@@ -470,7 +465,10 @@ def get_proto(config, encoder, dropout_layer, relation_dataset):
         labels, _, tokens = batch_data
         tokens = torch.stack([x.to(config.device) for x in tokens],dim=0)
         with torch.no_grad():
-            feature = dropout_layer(encoder(tokens))[1]
+            feature = encoder(tokens)
+            feature = feature[:, :feature.shape[1] // 2]
+            print("shape of feature proto : ", feature.shape )
+            # feature = dropout_layer(encoder(tokens))[1]
         features.append(feature)
     features = torch.cat(features, dim=0)
     proto = torch.mean(features, dim=0, keepdim=True).cpu()
@@ -743,12 +741,12 @@ if __name__ == '__main__':
             for relation in current_relations:
                 new_relation_data[rel2id[relation]].extend(generate_current_relation_data(config, encoder,dropout_layer,training_data[relation]))
 
-            expanded_train_data_for_initial, expanded_prev_samples = data_augmentation(config, encoder,
-                                                                                       train_data_for_initial,
-                                                                                       prev_samples)
+            # expanded_train_data_for_initial, expanded_prev_samples = data_augmentation(config, encoder,
+            #                                                                            train_data_for_initial,
+            #                                                                            prev_samples)
             torch.cuda.empty_cache()
-            print(len(train_data_for_initial))
-            print(len(expanded_train_data_for_initial))
+            # print(len(train_data_for_initial))
+            # print(len(expanded_train_data_for_initial))
 
 
             train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step2_epochs, map_relid2tempid, new_relation_data,
@@ -812,12 +810,21 @@ if __name__ == '__main__':
             rep_des = rep_des.detach().cpu().data
             print("rep_des shape", rep_des.shape)
 
-
+            # Update proto
+            seen_proto = []  
+            for rel in seen_relations:
+                proto, _ = get_proto(config, encoder, dropout_layer, memorized_samples[relation])
+                seen_proto.append(proto)
+            seen_proto = torch.stack(seen_proto, dim=0)
 
             # cur_acc = evaluate_model_rrf(config, encoder,dropout_layer,classifier, test_data_1, seen_relations, map_relid2tempid, rep_des, seen_relid)
             # total_acc = evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid, rep_des, seen_relid)
-            cur_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations, map_relid2tempid)
-            total_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid)
+            # cur_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations, map_relid2tempid)
+            # total_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid)
+            cur_acc = eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data_1)
+            total_acc = eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data_2 )
+
+            
             print(f'Restart Num {rou + 1}')
             print(f'task--{steps + 1}:')
             print(f'current test acc:{cur_acc}')
