@@ -44,7 +44,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
 
 
             labels, _, tokens = batch_data
-            
+            ori_labels = labels[:]
             labels = labels.to(config.device)
             labels = [map_relid2tempid[x.item()] for x in labels]
             labels = torch.tensor(labels).to(config.device)
@@ -59,19 +59,22 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
 
             # get description of batch
             batch_description = []
-            for label in labels:
+            for label in ori_labels:
                 batch_description.append(seen_des_by_id[label.item()])
             batch_description = torch.cat(batch_description, dim=0)
 
             hidden_des = encoder.forward_description(batch_description) # B x H
             # label_matrix : B x B => 1 if label is the same, 0 otherwise
             label_matrix = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float().to(config.device)
-            mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
-            
+            # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+            mini_reps = reps
+            # print("shape of reps", reps.shape)
+            # print("shape of mini_reps", mini_reps.shape)
+            # print("shape of hidden_des", hidden_des.shape)
             # compute loss retrieval
-            loss_retrieval = loss_retrieval(mini_reps, hidden_des, label_matrix)
+            loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
 
-            loss += loss_retrieval
+            loss += loss_r
 
 
             losses.append(loss.item())
@@ -194,6 +197,7 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
     triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
     distill_criterion = nn.CosineEmbeddingLoss()
     T = config.kl_temp
+    loss_retrieval = MultipleNegativesRankingLoss()
     for epoch_i in range(epochs):
         losses = []
         for step, (labels, _, tokens) in enumerate(data_loader):
@@ -202,6 +206,7 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
 
             logits_all = []
             tokens = torch.stack([x.to(config.device) for x in tokens], dim=0)
+
             labels = labels.to(config.device)
             origin_labels = labels[:]
             labels = [map_relid2tempid[x.item()] for x in labels]
@@ -273,19 +278,20 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
 
 
             batch_description = []
-            for label in labels:
+            for label in origin_labels:
                 batch_description.append(seen_des_by_id[label.item()])
             batch_description = torch.cat(batch_description, dim=0)
 
             hidden_des = encoder.forward_description(batch_description) # B x H
             # label_matrix : B x B => 1 if label is the same, 0 otherwise
             label_matrix = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float().to(config.device)
-            mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+            # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+            mini_reps = outputs
             
             # compute loss retrieval
-            loss_retrieval = loss_retrieval(mini_reps, hidden_des, label_matrix)
+            loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
 
-            loss += loss_retrieval
+            loss += loss_r
 
             loss.backward()
             losses.append(loss.item())
@@ -341,12 +347,14 @@ def evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data,
     return correct/n
 
 
-def _cosine_similarity(self, x1, x2):
+def _cosine_similarity(x1, x2):
         '''
         input: x1 (B, H), x2 (N, H) ; N is the number of relations
         return: (B, N)
         '''
-        b = x1.size()[0]
+        # print(x1)
+        # print(x2)
+        b = x1.shape[0]
         cos = nn.CosineSimilarity(dim=1)
         sim = []
         for i in range(b):
@@ -356,7 +364,7 @@ def _cosine_similarity(self, x1, x2):
         return sim
 
 def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, seen_relations, map_relid2tempid, rep_des, seen_relid):
-    data_loader = get_data_loader(config, test_data, batch_size=1)
+    data_loader = get_data_loader(config, test_data, batch_size=8)
     encoder.eval()
     dropout_layer.eval()
     classifier.eval()
@@ -365,7 +373,9 @@ def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, se
     correct = 0
     for step, batch_data in enumerate(data_loader):
         labels, _, tokens = batch_data
-        labels = labels.to(config.device)
+        origin_labels = labels[:] # label as relation id
+
+        labels = labels.to(config.device) # label as 0 1 2 3 ...
         labels = [map_relid2tempid[x.item()] for x in labels]
         labels = torch.tensor(labels).to(config.device)
 
@@ -378,7 +388,10 @@ def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, se
         seen_relation_ids = [map_relid2tempid[relation] for relation in seen_relation_ids]
         seen_sim = logits[:,seen_relation_ids].cpu().data.numpy()
 
-        mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+        # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+        mini_reps = reps.cpu()
+        # print("mini_reps shape", mini_reps.shape)
+        # print("rep_des shape", rep_des.shape)
         logits_des = _cosine_similarity(mini_reps, rep_des)
 
         #combine using rrf
@@ -402,7 +415,7 @@ def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, se
 
         # if label_smi >= max_smi:
         #     correct += 1
-        correct += torch.eq(pred, labels).sum().item()
+        correct += torch.eq(pred, origin_labels).sum().item()
 
 
     return correct/n
@@ -644,11 +657,12 @@ if __name__ == '__main__':
                 tokenized_des = sampler.tokenizer.encode(seen_descriptions[rel],
                                                   padding = 'max_length',
                                                   truncation = True,
-                                                  max_length = config.max_length)
+                                                  max_length = config.max_length,
+                                                  return_tensors = 'pt')
                 if rel not in seen_des:
                     seen_des[rel] = tokenized_des
             
-            seen_des_by_id = {}
+            seen_des_by_id = {} # relation id -> tokenized description
             for rel in seen_relations:
                 seen_des_by_id[sampler.rel2id[rel]] = seen_des[rel]
 
@@ -691,7 +705,7 @@ if __name__ == '__main__':
                 forward_acc = evaluate_strict_model(config, prev_encoder, prev_dropout_layer, classifier, test_data_1, seen_relations, map_relid2tempid)
                 forward_accs.append(forward_acc)
 
-            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs, map_relid2tempid)
+            # train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs, map_relid2tempid, seen_des_by_id)
             print(f"simple finished")
 
 
@@ -720,9 +734,9 @@ if __name__ == '__main__':
             print(len(expanded_train_data_for_initial))
 
 
-            train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step2_epochs, map_relid2tempid, new_relation_data,
-                        prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index)
-            print(f"first finished")
+            # train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step2_epochs, map_relid2tempid, new_relation_data,
+            #             prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
+            # print(f"first finished")
 
             for relation in current_relations:
                 memorized_samples[relation] = select_data(config, encoder, dropout_layer, training_data[relation])
@@ -741,9 +755,9 @@ if __name__ == '__main__':
                 proto, _ = get_proto(config, encoder, dropout_layer, memorized_samples[relation])
                 temp_protos[rel2id[relation]] = proto
 
-            train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_memory, config.step3_epochs, map_relid2tempid, new_relation_data,
-                        prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index)
-            print(f"memory finished")
+            # train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_memory, config.step3_epochs, map_relid2tempid, new_relation_data,
+            #             prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
+            # print(f"memory finished")
             test_data_1 = []
             for relation in current_relations:
                 test_data_1 += test_data[relation]
@@ -769,14 +783,16 @@ if __name__ == '__main__':
             list_seen_des = []
             for i in range(len(seen_relations)):
                 list_seen_des.append(seen_des_by_id[seen_relid[i]])
+            list_seen_des = torch.cat(list_seen_des, dim=0)
+            # rep_des = []
+            # for i in range(len(list_seen_des)):
 
-            rep_des = []
-            for i in range(len(list_seen_des)):
-
-                hidden = encoder.forward_description(list_seen_des)
-                hidden = hidden.detach().cpu().data
-                rep_des.append(hidden)
-            rep_des = torch.cat(rep_des, dim=0)
+            #     hidden = encoder.forward_description(list_seen_des[i])
+            #     hidden = hidden.detach().cpu().data
+            #     rep_des.append(hidden)
+            with torch.no_grad():
+                rep_des = encoder.forward_description(list_seen_des)
+            print("rep_des shape", rep_des.shape)
 
 
 

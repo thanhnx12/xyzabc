@@ -10,6 +10,7 @@ class Bert_Encoder(base_model):
 
     def __init__(self, config):
         super(Bert_Encoder, self).__init__()
+        self.config = config
 
         # load model
         self.encoder = BertModel.from_pretrained(config.bert_path).cuda()
