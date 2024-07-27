@@ -74,7 +74,7 @@ def train_simple_model(config, encoder, dropout_layer, classifier, training_data
             # compute loss retrieval
             loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
 
-            loss += loss_r
+            loss = 0.7*loss + loss_r 
 
 
             losses.append(loss.item())
@@ -137,7 +137,8 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
         {'params': dropout_layer.parameters(), 'lr': 0.00001},
         {'params': classifier.parameters(), 'lr': 0.001}
     ])
-    
+    loss_retrieval = MultipleNegativesRankingLoss()
+
     triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2)
     for epoch_i in range(epochs):
         losses = []
@@ -168,7 +169,22 @@ def train_first(config, encoder, dropout_layer, classifier, training_data, epoch
             loss1 = criterion(logits_all.reshape(-1, logits_all.shape[-1]), m_labels.reshape(-1))
             loss2 = compute_jsd_loss(logits_all)
             tri_loss = triplet_loss(anchors, positives, negatives)
-            loss = loss1 + loss2 + tri_loss
+
+            batch_description = []
+            for label in origin_labels:
+                batch_description.append(seen_des_by_id[label.item()])
+            batch_description = torch.cat(batch_description, dim=0)
+
+            hidden_des = encoder.forward_description(batch_description) # B x H
+            # label_matrix : B x B => 1 if label is the same, 0 otherwise
+            label_matrix = torch.eq(labels.unsqueeze(1), labels.unsqueeze(0)).float().to(config.device)
+            # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
+            mini_reps = outputs
+            
+            # compute loss retrieval
+            loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
+
+            loss = loss1 + loss2 + tri_loss + 2*loss_r
 
             loss.backward()
             losses.append(loss.item())
@@ -291,7 +307,7 @@ def train_mem_model(config, encoder, dropout_layer, classifier, training_data, e
             # compute loss retrieval
             loss_r = loss_retrieval(mini_reps, hidden_des, label_matrix)
 
-            loss += loss_r
+            loss = 0.7*loss + loss_r
 
             loss.backward()
             losses.append(loss.item())
@@ -563,7 +579,7 @@ def data_augmentation(config, encoder, train_data, prev_train_data):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", default="tacred", type=str)
-    parser.add_argument("--shot", default=10, type=int)
+    parser.add_argument("--shot", default=5, type=int)
     parser.add_argument('--config', default='config.ini')
     args = parser.parse_args()
     config = Config(args.config)

@@ -45,8 +45,13 @@ class Bert_Encoder(base_model):
         output: [B, H]
         '''
         inputs = inputs.to(self.config.device)
-        output = self.encoder(inputs)[1] # pooler_output
-        return output
+
+        outputs = self.encoder(inputs) # pooler_output
+
+        last_hidden_states = outputs[0]  # shape: (batch_size, sequence_length, hidden_size)
+        average_outputs_words = torch.mean(last_hidden_states, dim=1)
+        return average_outputs_words
+
     def forward(self, inputs):
         '''
         :param inputs: of dimension [B, N]
