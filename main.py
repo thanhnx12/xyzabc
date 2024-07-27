@@ -386,7 +386,8 @@ def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, se
 
         seen_relation_ids = [rel2id[relation] for relation in seen_relations]
         seen_relation_ids = [map_relid2tempid[relation] for relation in seen_relation_ids]
-        seen_sim = logits[:,seen_relation_ids].cpu().data.numpy()
+        seen_sim = logits[:,seen_relation_ids].cpu()
+        # print("seen_sim shape", seen_sim.shape)
 
         # mini_reps = reps[:, config.hidden_size//2: config.hidden_size//2 * 3] # B x H
         mini_reps = reps.cpu()
@@ -398,8 +399,8 @@ def evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data, se
         logits_ranks = torch.argsort(torch.argsort(-seen_sim, dim=1), dim=1) + 1
         logits_des_ranks = torch.argsort(torch.argsort(-logits_des, dim=1), dim=1) + 1
 
-        rrf_logits = 1.0 / logits_ranks
-        rrf_logits_des = 1.0 / logits_des_ranks
+        rrf_logits = 0.7 / logits_ranks
+        rrf_logits_des = 0.3 / logits_des_ranks
         logits = rrf_logits + rrf_logits_des
 
         cur_index = torch.argmax(logits, dim=1)  # (B)
@@ -705,7 +706,7 @@ if __name__ == '__main__':
                 forward_acc = evaluate_strict_model(config, prev_encoder, prev_dropout_layer, classifier, test_data_1, seen_relations, map_relid2tempid)
                 forward_accs.append(forward_acc)
 
-            # train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs, map_relid2tempid, seen_des_by_id)
+            train_simple_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step1_epochs, map_relid2tempid, seen_des_by_id)
             print(f"simple finished")
 
 
@@ -734,9 +735,9 @@ if __name__ == '__main__':
             print(len(expanded_train_data_for_initial))
 
 
-            # train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step2_epochs, map_relid2tempid, new_relation_data,
-            #             prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
-            # print(f"first finished")
+            train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_initial, config.step2_epochs, map_relid2tempid, new_relation_data,
+                        prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
+            print(f"first finished")
 
             for relation in current_relations:
                 memorized_samples[relation] = select_data(config, encoder, dropout_layer, training_data[relation])
@@ -755,9 +756,9 @@ if __name__ == '__main__':
                 proto, _ = get_proto(config, encoder, dropout_layer, memorized_samples[relation])
                 temp_protos[rel2id[relation]] = proto
 
-            # train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_memory, config.step3_epochs, map_relid2tempid, new_relation_data,
-            #             prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
-            # print(f"memory finished")
+            train_mem_model(config, encoder, dropout_layer, classifier, train_data_for_memory, config.step3_epochs, map_relid2tempid, new_relation_data,
+                        prev_encoder, prev_dropout_layer, prev_classifier, prev_relation_index, seen_des_by_id)
+            print(f"memory finished")
             test_data_1 = []
             for relation in current_relations:
                 test_data_1 += test_data[relation]
@@ -792,13 +793,15 @@ if __name__ == '__main__':
             #     rep_des.append(hidden)
             with torch.no_grad():
                 rep_des = encoder.forward_description(list_seen_des)
+            rep_des = rep_des.detach().cpu().data
             print("rep_des shape", rep_des.shape)
 
 
 
-            cur_acc = evaluate_model_rrf(config, encoder,dropout_layer,classifier, test_data_1, seen_relations, map_relid2tempid, rep_des, seen_relid)
-            total_acc = evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid, rep_des, seen_relid)
-
+            # cur_acc = evaluate_model_rrf(config, encoder,dropout_layer,classifier, test_data_1, seen_relations, map_relid2tempid, rep_des, seen_relid)
+            # total_acc = evaluate_model_rrf(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid, rep_des, seen_relid)
+            cur_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_1, seen_relations, map_relid2tempid)
+            total_acc = evaluate_strict_model(config, encoder, dropout_layer, classifier, test_data_2, seen_relations, map_relid2tempid)
             print(f'Restart Num {rou + 1}')
             print(f'task--{steps + 1}:')
             print(f'current test acc:{cur_acc}')
