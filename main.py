@@ -297,7 +297,7 @@ def eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data):
         labels, _, tokens = batch_data
         origin_labels = labels[:] # label as relation id
 
-        labels = labels.to(config.device) # label as 0 1 2 3 ...
+        labels = labels.to(config.device) 
         labels = [map_relid2tempid[x.item()] for x in labels]
         labels = torch.tensor(labels).to(config.device)
 
@@ -441,7 +441,9 @@ def select_data(config, encoder, dropout_layer, relation_dataset):
         labels, _, tokens = batch_data
         tokens = torch.stack([x.to(config.device) for x in tokens],dim=0)
         with torch.no_grad():
-            feature = dropout_layer(encoder(tokens))[1].cpu()
+            # feature = dropout_layer(encoder(tokens))[1].cpu()
+            feature = encoder(tokens)
+            feature = feature[:,:feature.shape[1] // 2].cpu()
         features.append(feature)
 
     features = np.concatenate(features)
@@ -467,7 +469,7 @@ def get_proto(config, encoder, dropout_layer, relation_dataset):
         with torch.no_grad():
             feature = encoder(tokens)
             feature = feature[:, :feature.shape[1] // 2]
-            print("shape of feature proto : ", feature.shape )
+            # print("shape of feature proto : ", feature.shape )
             # feature = dropout_layer(encoder(tokens))[1]
         features.append(feature)
     features = torch.cat(features, dim=0)
@@ -496,7 +498,9 @@ def generate_current_relation_data(config, encoder, dropout_layer, relation_data
         labels, _, tokens = batch_data
         tokens = torch.stack([x.to(config.device) for x in tokens],dim=0)
         with torch.no_grad():
-            feature = dropout_layer(encoder(tokens))[1].cpu()
+            # feature = dropout_layer(encoder(tokens))[1].cpu()
+            feature = encoder(tokens)
+            feature = feature[:, :feature.shape[1] // 2]
         relation_data.append(feature)
     return relation_data
 
@@ -824,7 +828,7 @@ if __name__ == '__main__':
             cur_acc = eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data_1)
             total_acc = eval_encoder_proto(config, encoder, seen_proto, seen_relid, test_data_2 )
 
-            
+
             print(f'Restart Num {rou + 1}')
             print(f'task--{steps + 1}:')
             print(f'current test acc:{cur_acc}')
